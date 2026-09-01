@@ -1,0 +1,10 @@
+packages/llama_flutter_android/android/.cxx/
+packages/llama_flutter_android/example/build/
+
+*.apk
+*.lock
+.cxx/
+.gradle/
+Ubuntu-Elimu/
+
+website/

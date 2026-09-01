@@ -1,0 +1,568 @@
+// ============================================================================
+// TAB 3: DOCUMENT WORKSPACE & RAG CHAT (Pure Dart RAG Pipeline)
+// ============================================================================
+
+enum DocCategory { all, pdf, docx, txt, custom }
+
+class _DocEntry {
+  final String id;
+  final String title;
+  final DocCategory category;
+  final int sizeBytes;
+  final DateTime addedAt;
+  final List<String> chunks;
+
+  _DocEntry({
+    required this.id,
+    required this.title,
+    required this.category,
+    required this.sizeBytes,
+    required this.addedAt,
+    required this.chunks,
+  });
+
+  IconData get icon {
+    switch (category) {
+      case DocCategory.pdf: return Icons.picture_as_pdf;
+      case DocCategory.docx: return Icons.description;
+      case DocCategory.txt: return Icons.text_snippet;
+      case DocCategory.custom: return Icons.edit_note;
+      default: return Icons.insert_drive_file;
+    }
+  }
+
+  Color get color {
+    switch (category) {
+      case DocCategory.pdf: return Colors.redAccent;
+      case DocCategory.docx: return Colors.blueAccent;
+      case DocCategory.txt: return Colors.greenAccent;
+      case DocCategory.custom: return Colors.purpleAccent;
+      default: return Colors.grey;
+    }
+  }
+
+  String get sizeLabel {
+    if (sizeBytes < 1024) return '$sizeBytes B';
+    if (sizeBytes < 1024 * 1024) return '${(sizeBytes / 1024).toStringAsFixed(1)} KB';
+    return '${(sizeBytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
+}
+
+class _ChatMsg {
+  final bool isUser;
+  final bool isSystem;
+  String text;
+  double? generationSeconds;
+  _ChatMsg({required this.isUser, required this.text, this.isSystem = false, this.generationSeconds});
+}
+
+class RagTab extends StatefulWidget {
+  const RagTab({super.key});
+
+  @override
+  State<RagTab> createState() => _RagTabState();
+}
+
+class _RagTabState extends State<RagTab> {
+  final DenizenAI _denizen = DenizenAI();
+  DenizenSession? _session;
+
+  final List<_DocEntry> _docs = [];
+  String? _activDocId;
+  final List<_ChatMsg> _messages = [];
+  bool _isGenerating = false;
+  bool _isIngesting = false;
+
+  final ScrollController _scrollCtrl = ScrollController();
+  final TextEditingController _promptCtrl = TextEditingController();
+
+  @override
+  void dispose() {
+    _scrollCtrl.dispose();
+    _promptCtrl.dispose();
+    super.dispose();
+  }
+
+  // ── Fast Synchronous Ingestion & Chunking ──────────────────────────
+
+  List<String> _extractAndChunkFast(List<int> bytes, String ext) {
+    String text = "";
+    if (ext == 'pdf') {
+      final raw = String.fromCharCodes(bytes);
+      final sb = StringBuffer();
+      final tjRegex = RegExp(r'\(([^)]+)\)\s*Tj');
+      for (final m in tjRegex.allMatches(raw)) {
+        final g = m.group(1);
+        if (g != null && g.trim().length > 1) {
+          sb.writeln(g.trim());
+        }
+      }
+      if (sb.length < 50) {
+        final asciiRegex = RegExp(r"[A-Za-z0-9\s.,!?:;()'-]{4,}");
+        for (final m in asciiRegex.allMatches(raw)) {
+          final s = m.group(0)!.trim();
+          if (s.length >= 4 &&
+              !s.startsWith('/Font') &&
+              !s.startsWith('/Type') &&
+              !s.startsWith('/Catalog') &&
+              !s.startsWith('/Pages')) {
+            sb.writeln(s);
+          }
+        }
+      }
+      text = sb.toString();
+    } else {
+      try {
+        text = String.fromCharCodes(bytes).trim();
+      } catch (_) {
+        final raw = String.fromCharCodes(bytes);
+        final sb = StringBuffer();
+        final asciiRegex = RegExp(r"[A-Za-z0-9\s.,!?:;()'-]{4,}");
+        for (final m in asciiRegex.allMatches(raw)) {
+          final s = m.group(0)!.trim();
+          if (s.length >= 4 &&
+              !s.startsWith('/Font') &&
+              !s.startsWith('/Type') &&
+              !s.startsWith('/Catalog') &&
+              !s.startsWith('/Pages')) {
+            sb.writeln(s);
+          }
+        }
+        text = sb.toString();
+      }
+    }
+
+    if (text.trim().isEmpty) return [];
+
+    final words = text.split(RegExp(r'\s+'));
+    final List<String> chunks = [];
+    int start = 0;
+    const size = 150;
+    const overlap = 25;
+
+    while (start < words.length) {
+      final end = (start + size).clamp(0, words.length);
+      chunks.add(words.sublist(start, end).join(' '));
+      if (end == words.length) break;
+      start += size - overlap;
+      if (chunks.length >= 100) break;
+    }
+
+    return chunks;
+  }
+
+  List<String> _chunk(String content) {
+    final words = content.split(RegExp(r'\s+'));
+    final List<String> chunks = [];
+    int start = 0;
+    while (start < words.length) {
+      final end = (start + 150).clamp(0, words.length);
+      chunks.add(words.sublist(start, end).join(' '));
+      if (end == words.length) break;
+      start += 125;
+    }
+    return chunks;
+  }
+
+  List<String> _getRelevantChunks(String docId, String query) {
+    final doc = _docs.firstWhere((d) => d.id == docId);
+    return _scoreAndSort(doc.chunks, query);
+  }
+
+  List<String> _getChunksAllDocs(String query) {
+    final allChunks = _docs.expand((d) => d.chunks).toList();
+    return _scoreAndSort(allChunks, query);
+  }
+
+  List<String> _scoreAndSort(List<String> chunks, String query) {
+    final queryWords = query.toLowerCase().split(RegExp(r'\s+')).where((w) => w.length > 2).toSet();
+    if (queryWords.isEmpty) {
+      return chunks.take(3).toList();
+    }
+    
+    final scored = chunks.map((chunk) {
+      final chunkWords = chunk.toLowerCase().split(RegExp(r'\s+')).toSet();
+      final intersection = queryWords.intersection(chunkWords);
+      return MapEntry(chunk, intersection.length);
+    }).toList();
+    
+    scored.sort((a, b) => b.value.compareTo(a.value));
+    return scored.take(3).map((e) => e.key).toList();
+  }
+
+  Future<void> _pickAndIngest() async {
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.any,
+        allowMultiple: false,
+        withData: false, 
+      );
+      if (result == null || result.files.isEmpty) return;
+
+      final picked = result.files.first;
+      final name = picked.name;
+      final ext = (picked.extension ?? '').toLowerCase();
+
+      setState(() { _isIngesting = true; });
+
+      List<int> bytes;
+      if (picked.path != null && File(picked.path!).existsSync()) {
+        bytes = await File(picked.path!).readAsBytes();
+      } else if (picked.bytes != null && picked.bytes!.isNotEmpty) {
+        bytes = picked.bytes!;
+      } else {
+        throw Exception("Unable to access file data from phone storage.");
+      }
+
+      final chunks = _extractAndChunkFast(bytes, ext);
+      if (chunks.isEmpty) throw Exception("No readable text found in '$name'.");
+
+      DocCategory cat = DocCategory.txt;
+      if (ext == 'pdf') cat = DocCategory.pdf;
+      if (ext == 'docx' || ext == 'doc') cat = DocCategory.docx;
+
+      final doc = _DocEntry(
+        id: 'doc_${DateTime.now().millisecondsSinceEpoch}',
+        title: name, category: cat,
+        sizeBytes: picked.size, addedAt: DateTime.now(), chunks: chunks,
+      );
+      setState(() {
+        _docs.add(doc);
+        _activDocId = doc.id;
+        _messages.add(_ChatMsg(isUser: false, isSystem: true,
+          text: "Loaded '$name' — ${chunks.length} chunks ready. Chat scoped to this document."));
+      });
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Upload failed: $e')));
+    } finally {
+      setState(() { _isIngesting = false; });
+    }
+  }
+
+  // ── Paste custom text ────────────────────────────────────────────────────────
+
+  void _showPasteDialog() {
+    final titleCtrl = TextEditingController();
+    final contentCtrl = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: Colors.grey[900],
+        title: const Text('Add Text Note', style: TextStyle(color: Colors.white)),
+        content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: [
+          TextField(
+            controller: titleCtrl,
+            style: const TextStyle(color: Colors.white),
+            decoration: const InputDecoration(
+              labelText: 'Title', labelStyle: TextStyle(color: Colors.cyanAccent),
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: contentCtrl, maxLines: 8,
+            style: const TextStyle(color: Colors.white),
+            decoration: const InputDecoration(
+              labelText: 'Content', labelStyle: TextStyle(color: Colors.cyanAccent),
+              hintText: 'Paste or type your notes here...',
+              hintStyle: TextStyle(color: Colors.grey),
+              border: OutlineInputBorder(),
+            ),
+          ),
+        ])),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel', style: TextStyle(color: Colors.grey))),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.purpleAccent),
+            onPressed: () {
+              final t = titleCtrl.text.trim();
+              final c = contentCtrl.text.trim();
+              if (t.isEmpty || c.isEmpty) return;
+              Navigator.pop(context);
+              _ingestCustomText(t, c);
+            },
+            child: const Text('Save Note', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _ingestCustomText(String title, String content) {
+    final chunks = _chunk(content);
+    final doc = _DocEntry(
+      id: 'doc_${DateTime.now().millisecondsSinceEpoch}',
+      title: title, category: DocCategory.custom,
+      sizeBytes: content.length, addedAt: DateTime.now(), chunks: chunks,
+    );
+    setState(() {
+      _docs.add(doc);
+      _activDocId = doc.id;
+      _messages.add(_ChatMsg(isUser: false, isSystem: true,
+        text: "Note '$title' saved — ${chunks.length} chunks. Chat scoped to this note."));
+    });
+  }
+
+  // ── Send message ─────────────────────────────────────────────────────────────
+
+  Future<void> _sendMessage() async {
+    final text = _promptCtrl.text.trim();
+    if (text.isEmpty) return;
+    _promptCtrl.clear();
+
+    final chunks = _activDocId != null
+        ? _getRelevantChunks(_activDocId!, text)
+        : _getChunksAllDocs(text);
+
+    setState(() {
+      _messages.add(_ChatMsg(isUser: true, text: text));
+      _isGenerating = true;
+    });
+    _scrollToBottom();
+
+    if (!_denizen.isModelLoaded) {
+      final answer = chunks.isNotEmpty
+          ? "Document context for your query:\n\n${chunks.join('\n\n---\n\n')}\n\n"
+            "(Load a GGUF model in the 'Models' tab for full AI synthesis.)"
+          : "No documents uploaded yet. Add a file or paste text first.";
+      setState(() {
+        _messages.add(_ChatMsg(isUser: false, text: answer));
+        _isGenerating = false;
+      });
+      _scrollToBottom();
+      return;
+    }
+
+    final contextStr = chunks.isEmpty ? '' : chunks.join('\n\n---\n\n');
+    final systemPrompt = chunks.isEmpty
+        ? "You are a helpful assistant."
+        : "You are a helpful document assistant. Use the following document content as your knowledge base:\n\n$contextStr\n\nAnswer based ONLY on the above content.";
+
+    try {
+      _session = _denizen.createSession(systemPrompt: systemPrompt);
+    } catch (e) {
+      setState(() {
+        _messages.add(_ChatMsg(isUser: false, text: "Session error: $e"));
+        _isGenerating = false;
+      });
+      return;
+    }
+
+    final aiMsg = _ChatMsg(isUser: false, text: "");
+    setState(() { _messages.add(aiMsg); });
+
+    final sw = Stopwatch()..start();
+    try {
+      await for (final token in _session!.streamChat(text)) {
+        setState(() { aiMsg.text += token; });
+        _scrollToBottom();
+      }
+      sw.stop();
+      final sec = sw.elapsedMilliseconds / 1000.0;
+      setState(() {
+        aiMsg.text += "\n\n⏱️ Generated in ${sec.toStringAsFixed(1)}s";
+        aiMsg.generationSeconds = sec;
+      });
+    } catch (e) {
+      setState(() { aiMsg.text = "Error: $e"; });
+    } finally {
+      setState(() { _isGenerating = false; });
+      _scrollToBottom();
+    }
+  }
+
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollCtrl.hasClients) {
+        _scrollCtrl.animateTo(_scrollCtrl.position.maxScrollExtent,
+            duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
+      }
+    });
+  }
+
+  // ── UI ────────────────────────────────────────────────────────────────────────
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(children: [
+      // Status bar
+      Container(
+        color: Colors.grey[900],
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        child: Row(children: [
+          Expanded(child: Text(
+            _docs.isEmpty
+                ? "No documents — upload a file or paste text."
+                : _activDocId != null
+                    ? "Scoped: ${_docs.firstWhere((d) => d.id == _activDocId).title}"
+                    : "All ${_docs.length} document(s)",
+            style: const TextStyle(color: Colors.cyanAccent, fontSize: 12),
+          )),
+          if (_isIngesting)
+            const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)),
+        ]),
+      ),
+
+      // Toolbar
+      Container(
+        color: Colors.grey[850],
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        child: Row(children: [
+          ElevatedButton.icon(
+            onPressed: _isIngesting ? null : _pickAndIngest,
+            icon: const Icon(Icons.upload_file, size: 16),
+            label: const Text('Upload File'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.deepPurple,
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            ),
+          ),
+          const SizedBox(width: 6),
+          ElevatedButton.icon(
+            onPressed: _isIngesting ? null : _showPasteDialog,
+            icon: const Icon(Icons.note_add, size: 16),
+            label: const Text('Paste Text'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.teal,
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            ),
+          ),
+          const SizedBox(width: 6),
+          if (_activDocId != null)
+            TextButton(
+              onPressed: () => setState(() => _activDocId = null),
+              child: const Text('All Docs', style: TextStyle(color: Colors.cyanAccent, fontSize: 12)),
+            ),
+        ]),
+      ),
+
+      // Document chips
+      if (_docs.isNotEmpty)
+        Container(
+          height: 90,
+          color: Colors.grey[900],
+          child: ListView.builder(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+            itemCount: _docs.length,
+            itemBuilder: (_, i) {
+              final doc = _docs[i];
+              final isActive = doc.id == _activDocId;
+              return GestureDetector(
+                onTap: () => setState(() => _activDocId = doc.id),
+                child: Container(
+                  width: 140,
+                  margin: const EdgeInsets.only(right: 8),
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: isActive ? doc.color.withOpacity(0.2) : Colors.grey[800],
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: isActive ? doc.color : Colors.transparent, width: 1.5),
+                  ),
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Row(children: [
+                      Icon(doc.icon, size: 14, color: doc.color),
+                      const SizedBox(width: 4),
+                      Expanded(child: Text(doc.title,
+                        style: const TextStyle(fontSize: 11, color: Colors.white),
+                        maxLines: 1, overflow: TextOverflow.ellipsis)),
+                    ]),
+                    const SizedBox(height: 4),
+                    Text('${doc.chunks.length} chunks · ${doc.sizeLabel}',
+                        style: TextStyle(fontSize: 9, color: Colors.grey[400])),
+                    const Spacer(),
+                    GestureDetector(
+                      onTap: () => setState(() {
+                        _docs.removeWhere((d) => d.id == doc.id);
+                        if (_activDocId == doc.id) _activDocId = null;
+                      }),
+                      child: const Text('Delete', style: TextStyle(color: Colors.redAccent, fontSize: 9)),
+                    ),
+                  ]),
+                ),
+              );
+            },
+          ),
+        ),
+
+      // Chat
+      Expanded(
+        child: ListView.builder(
+          controller: _scrollCtrl,
+          padding: const EdgeInsets.all(12),
+          itemCount: _messages.length,
+          itemBuilder: (_, i) {
+            final msg = _messages[i];
+            if (msg.isSystem) {
+              return Container(
+                margin: const EdgeInsets.symmetric(vertical: 4),
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(color: Colors.grey[800], borderRadius: BorderRadius.circular(8)),
+                child: Text(msg.text, style: const TextStyle(color: Colors.cyanAccent, fontSize: 12)),
+              );
+            }
+            return Align(
+              alignment: msg.isUser ? Alignment.centerRight : Alignment.centerLeft,
+              child: Container(
+                margin: const EdgeInsets.symmetric(vertical: 4),
+                padding: const EdgeInsets.all(12),
+                constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.82),
+                decoration: BoxDecoration(
+                  color: msg.isUser ? Colors.deepPurple[700]! : Colors.grey[800]!,
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      msg.text.isEmpty && _isGenerating ? '...' : msg.text,
+                      style: const TextStyle(color: Colors.white, fontSize: 14),
+                    ),
+                    if (!msg.isUser && !msg.isSystem && msg.generationSeconds != null) ...[
+                      const SizedBox(height: 6),
+                      Text(
+                        '⏱️ ${msg.generationSeconds!.toStringAsFixed(1)}s',
+                        style: TextStyle(color: Colors.cyanAccent.withOpacity(0.8), fontSize: 10, fontWeight: FontWeight.w500),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            );
+          },
+        ),
+      ),
+
+      if (_isGenerating) const LinearProgressIndicator(),
+
+      // Input
+      Container(
+        color: Colors.grey[900],
+        padding: const EdgeInsets.fromLTRB(12, 6, 12, 12),
+        child: Row(children: [
+          Expanded(
+            child: TextField(
+              controller: _promptCtrl,
+              style: const TextStyle(color: Colors.white),
+              decoration: InputDecoration(
+                hintText: _docs.isEmpty ? 'Upload a document first...' : 'Ask about your document...',
+                hintStyle: const TextStyle(color: Colors.grey),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(24)),
+                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              ),
+              onSubmitted: (_) { if (!_isGenerating) _sendMessage(); },
+            ),
+          ),
+          const SizedBox(width: 8),
+          IconButton(
+            style: IconButton.styleFrom(backgroundColor: Colors.deepPurple),
+            icon: const Icon(Icons.send, color: Colors.white),
+            onPressed: _isGenerating ? null : _sendMessage,
+          ),
+        ]),
+      ),
+    ]);
+  }
+}
