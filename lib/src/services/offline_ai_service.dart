@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
-import 'package:llama_flutter_android/llama_flutter_android.dart';
+import '../llama/llama.dart';
 import '../models/offline_model.dart';
 import '../models/offline_context_params.dart';
 

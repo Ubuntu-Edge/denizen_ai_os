@@ -15,6 +15,9 @@ class DenizenVoiceSession {
     OfflineAudioService.instance.initTts();
   }
 
+  /// System prompt configured for this voice session.
+  String get systemPrompt => _systemPrompt;
+
   bool get isRecording => _isRecording;
 
   /// Speak text out loud using system Text-to-Speech (flutter_tts)

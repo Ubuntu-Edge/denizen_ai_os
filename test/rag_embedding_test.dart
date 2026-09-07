@@ -1,5 +1,4 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:flutter/widgets.dart';
 import 'package:denizen_ai/src/rag/tflite_embedding_provider.dart';
 
 void main() {

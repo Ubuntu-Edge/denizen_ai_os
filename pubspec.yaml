@@ -1,7 +1,9 @@
 name: denizen_ai
-description: A developer-friendly, cross-platform toolkit for offline AI on-device.
-version: 0.0.1
-publish_to: 'none'
+description: Privacy-first, on-device multimodal AI engine for Flutter. Run local LLMs, Vector RAG, and structured tool calling 100% offline.
+version: 0.1.0-dev.1
+homepage: https://ubuntuedge.io/denizen
+repository: https://github.com/Ubuntu-Edge/denizen_ai_os
+issue_tracker: https://github.com/Ubuntu-Edge/denizen_ai_os/issues
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -13,8 +15,6 @@ dependencies:
   path_provider: ^2.1.5
   shared_preferences: ^2.5.5
   http: ^1.6.0
-  llama_flutter_android: 
-    path: ./packages/llama_flutter_android
   connectivity_plus: ^6.1.5
   tflite_flutter: ^0.12.1
   sqlite3: ^2.9.4
@@ -31,6 +31,8 @@ dev_dependencies:
   integration_test:
     sdk: flutter
   flutter_lints: ^3.0.0
+  path_provider_platform_interface: ^2.1.2
+  plugin_platform_interface: ^2.1.8
 
 flutter:
   plugin:

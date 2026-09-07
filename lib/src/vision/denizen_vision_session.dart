@@ -8,6 +8,9 @@ class DenizenVisionSession {
   DenizenVisionSession({String? systemPrompt})
       : _systemPrompt = systemPrompt ?? 'You are a helpful visual assistant. Describe images accurately and concisely.';
 
+  /// System prompt configured for this vision session.
+  String get systemPrompt => _systemPrompt;
+
   /// Analyzes an image with an optional prompt.
   /// 
   /// The [imageBytes] should be a decoded image byte array (e.g., from an ImagePicker).

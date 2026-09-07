@@ -8,3 +8,13 @@ packages/llama_flutter_android/example/build/
 Ubuntu-Elimu/
 
 website/
+
+# Staging & Test Clones
+staging_denizen_ai_os/
+scratch*/
+
+# Build and local cache artifacts
+build/
+.dart_tool/
+*.log
+

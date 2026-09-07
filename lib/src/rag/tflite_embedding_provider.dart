@@ -50,7 +50,7 @@ class TFLiteEmbeddingProvider implements EmbeddingProvider {
     try {
 
     // 1. Tokenize
-    final maxLen = 128; // Fixed: must match the model's expected sequence length
+    const maxLen = 128; // Fixed: must match the model's expected sequence length
     final tokenIds = _tokenizer.tokenize(text, maxLen: maxLen);
     
     // Create inputs (batch size 1)

@@ -6,7 +6,7 @@ import 'package:flutter/services.dart' show rootBundle;
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:llama_flutter_android/llama_flutter_android.dart' show ChatMessage;
+import 'src/llama/llama.dart' show ChatMessage;
 import 'src/services/offline_ai_service.dart';
 import 'src/services/model_download_service.dart';
 import 'src/models/offline_model.dart';
@@ -39,6 +39,7 @@ export 'src/models/offline_completion_params.dart';
 export 'src/services/model_download_service.dart';
 export 'src/services/offline_ai_service.dart';
 export 'src/config/ubuntu_edge_config.dart';
+export 'src/llama/llama.dart' show ChatMessage, LlamaController, GenerationConfig;
 
 
 /// The core entry point for the Denizen AI SDK.

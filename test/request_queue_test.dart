@@ -1,9 +1,6 @@
 import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:denizen_ai/denizen_ai.dart';
-import 'package:denizen_ai/src/services/offline_ai_service.dart';
-import 'package:denizen_ai/src/models/offline_model.dart';
-import 'package:llama_flutter_android/llama_flutter_android.dart';
 
 class SlowFakeOfflineAIService implements OfflineAIService {
   final List<String> callLog = [];

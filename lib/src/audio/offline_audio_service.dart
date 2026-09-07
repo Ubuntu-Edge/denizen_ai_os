@@ -115,11 +115,13 @@ class OfflineAudioService {
 
           onResult(full, result.finalResult);
         },
-        listenFor: listenFor,
-        pauseFor: pauseFor,
-        partialResults: true,
-        listenMode: stt.ListenMode.dictation,
-        cancelOnError: false,
+        listenOptions: stt.SpeechListenOptions(
+          listenMode: stt.ListenMode.dictation,
+          cancelOnError: false,
+          partialResults: true,
+          listenFor: listenFor,
+          pauseFor: pauseFor,
+        ),
       );
     } else {
       onResult("Speech recognition not available on device.", true);
@@ -167,7 +169,7 @@ class OfflineAudioService {
         ),
       );
       
-      return result.text ?? "";
+      return result.text;
     } catch (e) {
       debugPrint('❌ Transcription error: $e');
       return "Error during transcription: $e";

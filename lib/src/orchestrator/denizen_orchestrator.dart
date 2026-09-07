@@ -5,7 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import '../services/offline_ai_service.dart';
 import '../rag/vector_storage_service.dart';
-import 'package:llama_flutter_android/llama_flutter_android.dart' show ChatMessage;
+import '../llama/llama.dart' show ChatMessage;
 
 /// Base classes for Isolate Communication
 abstract class OrchestratorCommand {}

@@ -112,10 +112,6 @@ class ModelDownloadService {
       String downloadUrl = url;
       String tempFileName = fileName;
       bool isCompressed = url.endsWith('.gz');
-      const headers = {
-        'User-Agent': 'Mozilla/5.0 (Mobile; DenizenAI/1.0)',
-        'Accept': '*/*',
-      };
 
       final tempFile = File('${modelDir.path}/$tempFileName.tmp');
       final finalFile = File('${modelDir.path}/$fileName');
@@ -414,7 +410,7 @@ class ModelDownloadService {
   /// Check if enough storage is available for model
   Future<bool> hasEnoughStorage(int requiredBytes) async {
     final available = await getAvailableStorageBytes();
-    final buffer = 500 * 1024 * 1024; // 500MB safety buffer
+    const buffer = 500 * 1024 * 1024; // 500MB safety buffer
     return available > (requiredBytes + buffer);
   }
 

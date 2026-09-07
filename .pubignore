@@ -1,0 +1,13 @@
+# Cache and build artifacts
+build/
+.dart_tool/
+*.log
+
+# Desktop native test dependencies and local packages
+windows_deps/
+packages/
+release_bundle/
+scratch*
+
+# Test fixtures and scripts
+test/fixtures/
