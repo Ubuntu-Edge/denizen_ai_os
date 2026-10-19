@@ -4,6 +4,29 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../models/offline_model.dart';
+import 'device_hardware_service.dart';
+
+/// Thrown when a downloaded model file fails byte-count or checksum integrity checks.
+class DownloadIntegrityException implements Exception {
+  final String modelId;
+  final String filename;
+  final int expectedBytes;
+  final int actualBytes;
+  final String message;
+
+  DownloadIntegrityException({
+    required this.modelId,
+    required this.filename,
+    required this.expectedBytes,
+    required this.actualBytes,
+    String? message,
+  }) : message = message ??
+            'Integrity check failed for $filename ($modelId): expected $expectedBytes bytes, but file has $actualBytes bytes. File may be corrupted or truncated.';
+
+  @override
+  String toString() => 'DownloadIntegrityException: $message';
+}
 
 /// Service for downloading AI models with compression support and progress tracking
 /// Handles multiple models, automatic extraction, and storage management
@@ -84,159 +107,204 @@ class ModelDownloadService {
     return appDir;
   }
 
-  /// Download a model from URL with progress tracking
-  /// Supports both compressed (.gguf.gz) and uncompressed (.gguf) files
-  /// Returns a stream of progress updates
+  /// Download an [OfflineModel] with automatic multi-file support (LM + mmproj),
+  /// hardware RAM floor assertion, dynamic progress weighting, and byte integrity verification.
+  Stream<ModelDownloadProgress> downloadOfflineModel({
+    required OfflineModel model,
+    bool useCompression = false,
+  }) {
+    return downloadModel(
+      url: model.downloadUrl ?? '',
+      modelId: model.id,
+      fileName: model.filename ?? '',
+      author: model.author,
+      useCompression: useCompression,
+      expectedSizeBytes: model.size,
+      vision: model.vision,
+      minRamMB: model.minRamMB,
+    );
+  }
+
+  /// Download a model from URL with progress tracking.
+  /// Supports multi-file paired downloads (vision models), HTTP Range resumption,
+  /// and post-download byte-length integrity verification.
   Stream<ModelDownloadProgress> downloadModel({
     required String url,
     required String modelId,
     required String fileName,
     required String author,
     bool useCompression = false,
+    int? expectedSizeBytes,
+    VisionConfig? vision,
+    int? minRamMB,
   }) async* {
     // Create progress stream
     final progressController = StreamController<ModelDownloadProgress>();
-    _activeDownloads[modelId] = progressController;    await _saveActiveDownloads(); // Persist download state
+    _activeDownloads[modelId] = progressController;
+    await _saveActiveDownloads(); // Persist download state
     try {
-      // Get storage directory (external on Android for persistence across updates)
+      // 1. Assert hardware RAM floor before beginning download
+      if (minRamMB != null) {
+        final ramMB = await DeviceHardwareService.getTotalRamMB();
+        if (ramMB < minRamMB) {
+          throw IncompatibleHardwareException(
+            modelId: modelId,
+            requiredRamMB: minRamMB,
+            availableRamMB: ramMB,
+          );
+        }
+      }
+
+      // 2. Prepare storage directories
       final storageDir = await getModelStorageDirectory();
       final modelDir = Directory('${storageDir.path}/models/$author');
       await modelDir.create(recursive: true);
-      
+
       debugPrint('📥 Starting download for $modelId');
       debugPrint('   URL: $url');
       debugPrint('   Author: $author');
       debugPrint('   Filename: $fileName');
       debugPrint('   Save dir: ${modelDir.path}');
 
-      String downloadUrl = url;
-      String tempFileName = fileName;
-      bool isCompressed = url.endsWith('.gz');
+      // Compute dynamic weights based on exact byte counts (no hardcoded 70/30)
+      final int lmExpected = expectedSizeBytes ?? 0;
+      final int mmprojExpected = vision?.mmprojSize ?? 0;
+      final int totalOverallBytes = (lmExpected + mmprojExpected) > 0
+          ? (lmExpected + mmprojExpected)
+          : (expectedSizeBytes ?? 1);
+      final double lmWeight = lmExpected > 0 ? (lmExpected / totalOverallBytes) : 1.0;
+      final double mmprojWeight = mmprojExpected > 0 ? (mmprojExpected / totalOverallBytes) : 0.0;
 
-      final tempFile = File('${modelDir.path}/$tempFileName.tmp');
       final finalFile = File('${modelDir.path}/$fileName');
+      final tempFile = File('${modelDir.path}/$fileName.tmp');
 
-      // Check for partial download to resume
-      int startByte = 0;
-      if (await tempFile.exists()) {
-        startByte = await tempFile.length();
-        debugPrint('🔄 Resuming download from byte $startByte');
-      }
-
-      // Check if already downloaded
-      if (await finalFile.exists()) {
-        final fileSize = await finalFile.length();
-        debugPrint('🔍 Found existing file: ${finalFile.path}');
-        debugPrint('   Size: ${(fileSize / (1024 * 1024)).toStringAsFixed(1)} MB');
-        
-        if (fileSize > 1024 * 1024) {
-          // File exists and is valid
-          debugPrint('✅ File already downloaded, skipping download');
-          yield ModelDownloadProgress(
-            modelId: modelId,
-            stage: ModelDownloadStage.completed,
-            progress: 100,
-            localPath: finalFile.path,
-          );
-          await progressController.close();
-          _activeDownloads.remove(modelId);
-          return;
-        } else {
-          debugPrint('⚠️ Existing file too small, will re-download');
-          await finalFile.delete();
-        }
-      }
-
-      // Start download using native HttpClient for seamless 302/307 CDN redirect handling
-      final client = HttpClient();
-      final request = await client.getUrl(Uri.parse(downloadUrl));
-      request.headers.set('User-Agent', 'Mozilla/5.0 (Mobile; DenizenAI/1.0)');
-      request.headers.set('Accept', '*/*');
-      if (startByte > 0) {
-        request.headers.set('Range', 'bytes=$startByte-');
-      }
-
-      final response = await request.close();
-
-      if (response.statusCode == 416) {
-        debugPrint('⚠️ HTTP 416: Range not satisfiable. Temp file is likely fully downloaded.');
-      } else if (response.statusCode != 200 && response.statusCode != 206) {
-        debugPrint('❌ HTTP Error: ${response.statusCode}');
-        throw Exception('Download HTTP error ${response.statusCode}');
-      } else {
-        final totalBytes = (response.contentLength > 0 ? response.contentLength : 0) + startByte;
-        int receivedBytes = startByte;
-        final sink = tempFile.openWrite(mode: FileMode.append);
-
-        // Track download progress
-        await for (final chunk in response) {
-          if (!_activeDownloads.containsKey(modelId)) {
-            // Download was cancelled
-            await sink.close();
-            if (await tempFile.exists()) {
-              await tempFile.delete();
-            }
-            client.close();
+      // Helper function to download an individual file component with Range resumption
+      Future<void> downloadComponent({
+        required String componentUrl,
+        required File componentTempFile,
+        required File componentFinalFile,
+        required int componentExpectedBytes,
+        required double progressOffset,
+        required double progressFactor,
+      }) async {
+        // If final file already exists and matches expected size, skip
+        if (await componentFinalFile.exists()) {
+          final existingLen = await componentFinalFile.length();
+          if (componentExpectedBytes <= 0 || existingLen == componentExpectedBytes) {
+            debugPrint('✅ File already downloaded & verified: ${componentFinalFile.path}');
             return;
+          } else {
+            debugPrint('⚠️ Existing file size mismatch ($existingLen vs $componentExpectedBytes). Re-downloading.');
+            await componentFinalFile.delete();
           }
-
-          sink.add(chunk);
-          receivedBytes += chunk.length;
-
-          final progress = totalBytes > 0 ? (receivedBytes / totalBytes) * 100 : 0;
-          final progressData = ModelDownloadProgress(
-            modelId: modelId,
-            stage: ModelDownloadStage.downloading,
-            progress: progress.toDouble(),
-            downloadedBytes: receivedBytes,
-            totalBytes: totalBytes,
-          );
-          
-          progressController.add(progressData);
-          yield progressData;
         }
-        await sink.close();
-      }
 
-      client.close();
-      _downloadClients.remove(modelId);
-
-      // Extract if compressed
-      if (isCompressed) {
-        final extractingProgress = ModelDownloadProgress(
-          modelId: modelId,
-          stage: ModelDownloadStage.extracting,
-          progress: 0,
-        );
-        progressController.add(extractingProgress);
-        yield extractingProgress;
-
-        await _extractGzip(tempFile, finalFile, (progress) {
-          final extractProgress = ModelDownloadProgress(
-            modelId: modelId,
-            stage: ModelDownloadStage.extracting,
-            progress: progress,
-          );
-          progressController.add(extractProgress);
-        });
-
-        if (await tempFile.exists()) {
-          await tempFile.delete();
+        int startByte = 0;
+        if (await componentTempFile.exists()) {
+          startByte = await componentTempFile.length();
+          debugPrint('🔄 Resuming download for ${componentFinalFile.path} from byte $startByte');
         }
-      } else {
-        // Just rename temp file
-        // On Windows, rename can fail if the file was just closed due to AV or OS locks.
+
+        final client = HttpClient();
+        final request = await client.getUrl(Uri.parse(componentUrl));
+        request.headers.set('User-Agent', 'Mozilla/5.0 (Mobile; DenizenAI/1.0)');
+        request.headers.set('Accept', '*/*');
+        if (startByte > 0) {
+          request.headers.set('Range', 'bytes=$startByte-');
+        }
+
+        final response = await request.close();
+
+        if (response.statusCode == 416) {
+          debugPrint('⚠️ HTTP 416: Range not satisfiable. Temp file likely fully downloaded.');
+        } else if (response.statusCode != 200 && response.statusCode != 206) {
+          throw Exception('Download HTTP error ${response.statusCode} for $componentUrl');
+        } else {
+          final streamTotal = (response.contentLength > 0 ? response.contentLength : 0) + startByte;
+          int receivedBytes = startByte;
+          final sink = componentTempFile.openWrite(mode: FileMode.append);
+
+          await for (final chunk in response) {
+            if (!_activeDownloads.containsKey(modelId)) {
+              await sink.close();
+              if (await componentTempFile.exists()) {
+                await componentTempFile.delete();
+              }
+              client.close();
+              return;
+            }
+
+            sink.add(chunk);
+            receivedBytes += chunk.length;
+
+            final fileProgressPercent = streamTotal > 0
+                ? (receivedBytes / streamTotal)
+                : 0.0;
+            final overallProgressPercent =
+                (progressOffset + (fileProgressPercent * progressFactor)) * 100;
+
+            final progressData = ModelDownloadProgress(
+              modelId: modelId,
+              stage: ModelDownloadStage.downloading,
+              progress: overallProgressPercent.clamp(0.0, 99.9),
+              downloadedBytes: (progressOffset * totalOverallBytes).toInt() + receivedBytes,
+              totalBytes: totalOverallBytes,
+            );
+
+            progressController.add(progressData);
+          }
+          await sink.close();
+        }
+        client.close();
+
+        // Rename temp to final
         try {
-          await tempFile.rename(finalFile.path);
+          await componentTempFile.rename(componentFinalFile.path);
         } catch (e) {
-          debugPrint('Rename failed, attempting copy and delete: $e');
           await Future.delayed(const Duration(milliseconds: 500));
-          await tempFile.copy(finalFile.path);
-          await tempFile.delete();
+          await componentTempFile.copy(componentFinalFile.path);
+          await componentTempFile.delete();
+        }
+
+        // Post-download integrity verification
+        final actualSize = await componentFinalFile.length();
+        if (componentExpectedBytes > 0 && actualSize != componentExpectedBytes) {
+          await componentFinalFile.delete();
+          throw DownloadIntegrityException(
+            modelId: modelId,
+            filename: componentFinalFile.path.split(Platform.pathSeparator).last,
+            expectedBytes: componentExpectedBytes,
+            actualBytes: actualSize,
+          );
         }
       }
 
-      // Verify file
+      // Step 1: Download Base LM file
+      await downloadComponent(
+        componentUrl: url,
+        componentTempFile: tempFile,
+        componentFinalFile: finalFile,
+        componentExpectedBytes: lmExpected,
+        progressOffset: 0.0,
+        progressFactor: lmWeight,
+      );
+
+      // Step 2: Download mmproj projector if vision model
+      if (vision != null) {
+        final mmprojFinalFile = File('${modelDir.path}/${vision.mmprojFilename}');
+        final mmprojTempFile = File('${modelDir.path}/${vision.mmprojFilename}.tmp');
+
+        await downloadComponent(
+          componentUrl: vision.mmprojUrl,
+          componentTempFile: mmprojTempFile,
+          componentFinalFile: mmprojFinalFile,
+          componentExpectedBytes: mmprojExpected,
+          progressOffset: lmWeight,
+          progressFactor: mmprojWeight,
+        );
+      }
+
+      // Verify file stage
       final verifyingProgress = ModelDownloadProgress(
         modelId: modelId,
         stage: ModelDownloadStage.verifying,
@@ -252,7 +320,7 @@ class ModelDownloadService {
         throw Exception('Downloaded file is invalid or too small');
       }
 
-      // Complete
+      // Complete stage
       final completeProgress = ModelDownloadProgress(
         modelId: modelId,
         stage: ModelDownloadStage.completed,
@@ -301,7 +369,7 @@ class ModelDownloadService {
   }
 
   /// Extract gzip compressed file with progress tracking
-  Future<void> _extractGzip(
+  Future<void> extractGzip(
     File compressedFile,
     File outputFile,
     Function(double) onProgress,

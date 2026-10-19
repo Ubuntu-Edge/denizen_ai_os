@@ -1,13 +1,15 @@
+import 'package:meta/meta.dart';
+
 /// Ubuntu Edge Platform configuration for the Denizen AI SDK.
 ///
 /// Pass an instance of this class to [DenizenAI.configure] at app startup
-/// to opt into Ubuntu Edge Platform services. All fields are optional and
+/// to opt into Ubuntu Edge Platform preview services. All fields are optional and
 /// default to sensible values.
 ///
-/// **Important:** Ubuntu Edge Platform services are currently in development.
-/// Providing this config today registers your intent and ensures your app code
-/// is forward-compatible — the SDK will activate the relevant service hooks
-/// automatically when the platform launches without any changes on your end.
+/// **Important Note (Preview):** Ubuntu Edge Platform cloud services (Smart Fallback,
+/// OTA updates, Multilingual Gateway) are currently in active development.
+/// Providing this config today registers your intent for forward compatibility.
+/// Currently, all inference and storage execute 100% on-device offline.
 ///
 /// ## Quick Start
 /// ```dart
@@ -22,8 +24,9 @@
 ///   runApp(const MyApp());
 /// }
 /// ```
-///
-/// Obtain an API key at: https://platform.ubuntuedge.io/dashboard
+/// Note: Cloud platform registration will open with the Ubuntu Edge platform launch.
+/// During preview, pass any identifier (e.g., `'ue-dev-preview'`) for forward-compatibility.
+@experimental
 class UbuntuEdgeConfig {
   // ---------------------------------------------------------------------------
   // Authentication
@@ -31,7 +34,8 @@ class UbuntuEdgeConfig {
 
   /// Your Ubuntu Edge Platform API key.
   ///
-  /// Obtain from: https://platform.ubuntuedge.io/dashboard
+  /// Dashboard registration will open with the public platform launch.
+  /// During preview, any non-empty string (e.g. `'ue-dev-preview'`) may be used.
   final String apiKey;
 
   /// Base URL for the Ubuntu Edge API.

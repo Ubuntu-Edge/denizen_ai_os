@@ -1,9 +1,57 @@
+/// Configuration for vision-capable models (VLMs) requiring an mmproj projector.
+class VisionConfig {
+  final String mmprojUrl;
+  final String mmprojFilename;
+  final int mmprojSize; // Exact byte count for integrity and progress weighting
+  final int? imageSize; // e.g. 384 or 448
+  final int minImageTokens; // e.g. 64 (speed dial)
+  final int maxImageTokens; // e.g. 256 for gauge, 512 for dense forms
+  final String projectorType; // 'siglip'
+  final String? sha256;
+
+  const VisionConfig({
+    required this.mmprojUrl,
+    required this.mmprojFilename,
+    required this.mmprojSize,
+    this.imageSize,
+    this.minImageTokens = 64,
+    this.maxImageTokens = 256,
+    this.projectorType = 'siglip',
+    this.sha256,
+  });
+
+  /// Get mmproj size in MB
+  double get sizeMB => mmprojSize / (1024 * 1024);
+
+  Map<String, dynamic> toJson() => {
+        'mmprojUrl': mmprojUrl,
+        'mmprojFilename': mmprojFilename,
+        'mmprojSize': mmprojSize,
+        if (imageSize != null) 'imageSize': imageSize,
+        'minImageTokens': minImageTokens,
+        'maxImageTokens': maxImageTokens,
+        'projectorType': projectorType,
+        if (sha256 != null) 'sha256': sha256,
+      };
+
+  factory VisionConfig.fromJson(Map<String, dynamic> json) => VisionConfig(
+        mmprojUrl: json['mmprojUrl'] as String,
+        mmprojFilename: json['mmprojFilename'] as String,
+        mmprojSize: json['mmprojSize'] as int? ?? 0,
+        imageSize: json['imageSize'] as int?,
+        minImageTokens: json['minImageTokens'] as int? ?? 64,
+        maxImageTokens: json['maxImageTokens'] as int? ?? 256,
+        projectorType: json['projectorType'] as String? ?? 'siglip',
+        sha256: json['sha256'] as String?,
+      );
+}
+
 /// Represents an offline GGUF model available for local inference
 class OfflineModel {
   final String id;
   final String name;
   final String author;
-  final int size; // in bytes
+  final int size; // in bytes (base LM)
   final String? downloadUrl;
   final String? filename;
   final bool isDownloaded;
@@ -13,6 +61,8 @@ class OfflineModel {
   final String? quantization; // Q4_K_M, Q6_K, Q8_0, etc.
   final List<String> tags; // ['medical', 'reasoning', etc.]
   final int contextSize; // Context window size
+  final VisionConfig? vision; // Vision configuration if multimodal
+  final int minRamMB; // Minimum physical device RAM required in MB (e.g. 2048 or 4096)
 
   OfflineModel({
     required this.id,
@@ -28,13 +78,24 @@ class OfflineModel {
     this.quantization,
     this.tags = const [],
     this.contextSize = 2048,
+    this.vision,
+    this.minRamMB = 2048,
   });
 
-  /// Get size in MB
+  /// Whether this model supports multimodal vision input
+  bool get isVision => vision != null;
+
+  /// Total download size including mmproj if vision model
+  int get totalSizeBytes => size + (vision?.mmprojSize ?? 0);
+
+  /// Get base model size in MB
   double get sizeMB => size / (1024 * 1024);
 
-  /// Get size in GB
+  /// Get base model size in GB
   double get sizeGB => size / (1024 * 1024 * 1024);
+
+  /// Get total size in MB (including mmproj if vision model)
+  double get totalSizeMB => totalSizeBytes / (1024 * 1024);
 
   /// Create a copy with modified fields
   OfflineModel copyWith({
@@ -51,6 +112,8 @@ class OfflineModel {
     String? quantization,
     List<String>? tags,
     int? contextSize,
+    VisionConfig? vision,
+    int? minRamMB,
   }) {
     return OfflineModel(
       id: id ?? this.id,
@@ -66,6 +129,8 @@ class OfflineModel {
       quantization: quantization ?? this.quantization,
       tags: tags ?? this.tags,
       contextSize: contextSize ?? this.contextSize,
+      vision: vision ?? this.vision,
+      minRamMB: minRamMB ?? this.minRamMB,
     );
   }
 
@@ -84,6 +149,8 @@ class OfflineModel {
         'quantization': quantization,
         'tags': tags,
         'contextSize': contextSize,
+        if (vision != null) 'vision': vision!.toJson(),
+        'minRamMB': minRamMB,
       };
 
   /// Create from JSON
@@ -102,9 +169,14 @@ class OfflineModel {
       quantization: json['quantization'] as String?,
       tags: (json['tags'] as List<dynamic>?)?.cast<String>() ?? [],
       contextSize: json['contextSize'] as int? ?? 2048,
+      vision: json['vision'] != null
+          ? VisionConfig.fromJson(json['vision'] as Map<String, dynamic>)
+          : null,
+      minRamMB: json['minRamMB'] as int? ?? 2048,
     );
   }
 
   @override
-  String toString() => 'OfflineModel(id: $id, name: $name, size: ${sizeMB.toStringAsFixed(1)} MB)';
+  String toString() =>
+      'OfflineModel(id: $id, name: $name, totalSize: ${totalSizeMB.toStringAsFixed(1)} MB, isVision: $isVision)';
 }

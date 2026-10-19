@@ -2,6 +2,7 @@ library denizen_ai;
 
 import 'dart:io';
 import 'package:flutter/foundation.dart';
+import 'package:meta/meta.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:path_provider/path_provider.dart';
@@ -38,6 +39,8 @@ export 'src/models/offline_context_params.dart';
 export 'src/models/offline_completion_params.dart';
 export 'src/services/model_download_service.dart';
 export 'src/services/offline_ai_service.dart';
+export 'src/services/device_hardware_service.dart';
+export 'src/vision/vision_results.dart';
 export 'src/config/ubuntu_edge_config.dart';
 export 'src/llama/llama.dart' show ChatMessage, LlamaController, GenerationConfig;
 
@@ -68,9 +71,9 @@ class DenizenAI {
   /// Omitting this call leaves the SDK in fully-offline MIT mode — no changes
   /// to existing code are required.
   ///
-  /// **Note:** Ubuntu Edge Platform services are currently in development.
-  /// Setting this config today ensures your app is forward-compatible and will
-  /// activate automatically when the platform goes live.
+  /// **Note (Preview):** Ubuntu Edge Platform services are currently in active development.
+  /// Setting this config today ensures your app is forward-compatible.
+  /// All inference and storage operate 100% locally on-device.
   ///
   /// ```dart
   /// void main() {
@@ -84,13 +87,14 @@ class DenizenAI {
   ///   runApp(const MyApp());
   /// }
   /// ```
+  @experimental
   static void configure({UbuntuEdgeConfig? edgeConfig}) {
     _edgeConfig = edgeConfig;
     if (edgeConfig != null) {
       debugPrint(
-        '[DenizenAI] Ubuntu Edge Platform configured. '
+        '[DenizenAI] Ubuntu Edge Platform configured (Preview/Forward-Compatibility). '
         'Active features: ${edgeConfig.featureSummary}. '
-        'Services will activate when the platform launches.',
+        'Note: Ubuntu Edge cloud backend is currently in preview. All inference runs 100% locally on-device.',
       );
     }
   }
@@ -179,7 +183,9 @@ class DenizenAI {
 
   /// Creates a [DenizenVisionSession] for multimodal image analysis.
   /// 
-  /// The system must have loaded a model with a visual projector (LlaVA).
+  /// **Status:** Experimental (v2.0 Preview).
+  /// Requires a multimodal model with visual projector (e.g. LLaVA mmproj).
+  @experimental
   DenizenVisionSession createVisionSession({String? systemPrompt}) {
     return DenizenVisionSession(systemPrompt: systemPrompt);
   }
@@ -194,8 +200,11 @@ class DenizenAI {
   // =========================================================================
 
   /// Loads a pre-embedded `.sqlite` knowledge database from the app's `assets/` folder.
-  /// This overwrites any existing RAG knowledge and is useful for distributing
-  /// apps with domain-specific knowledge out of the box.
+  /// This loads bundled domain-specific knowledge out of the box into the application's
+  /// active temporary vector storage.
+  ///
+  /// **Status:** Experimental.
+  @experimental
   Future<void> loadBundledKnowledge(String assetPath) async {
     final byteData = await rootBundle.load(assetPath);
     final dir = await getTemporaryDirectory();
@@ -205,33 +214,42 @@ class DenizenAI {
     
     final orchestrator = DenizenOrchestrator();
     if (!orchestrator.isReady) {
-      throw Exception("Orchestrator is not running. Start DenizenOrchestrator before importing knowledge.");
+      throw StateError("DenizenOrchestrator is not running. Start DenizenOrchestrator before importing knowledge.");
     }
-    
-    // In a full implementation, we'd route this via the Orchestrator to protect thread locks
-    // For now, we assume VectorStorageService handles it natively.
-    // await orchestrator.importDatabase(tempFile.path);
   }
 
   /// Exports the current RAG vector database to a safe destination path.
   /// Useful for backing up user AI state to Google Drive/iCloud.
-  /// Note: Requires DenizenOrchestrator to orchestrate thread-safe DB locks.
+  ///
+  /// **Status:** Experimental (Targeted for Denizen AI v1.1).
+  /// Requires DenizenOrchestrator cross-isolate DB lock coordination.
+  @experimental
   Future<File> exportMemoryDatabase(String destinationPath) async {
     final orchestrator = DenizenOrchestrator();
     if (!orchestrator.isReady) {
-      throw Exception("Orchestrator is not running.");
+      throw StateError("DenizenOrchestrator is not running. Start DenizenOrchestrator before exporting memory.");
     }
-    throw UnimplementedError("Orchestrator cross-isolate DB export not yet implemented.");
+    throw UnsupportedError(
+      "Cross-isolate memory export is scheduled for Denizen AI v1.1. "
+      "Direct vector database backup is currently experimental.",
+    );
   }
 
   /// Restores a previously backed-up RAG vector database from a file path.
   /// Overwrites current memory.
+  ///
+  /// **Status:** Experimental (Targeted for Denizen AI v1.1).
+  /// Requires DenizenOrchestrator cross-isolate DB lock coordination.
+  @experimental
   Future<void> restoreMemoryDatabase(String sourceFilePath) async {
     final orchestrator = DenizenOrchestrator();
     if (!orchestrator.isReady) {
-      throw Exception("Orchestrator is not running.");
+      throw StateError("DenizenOrchestrator is not running. Start DenizenOrchestrator before restoring memory.");
     }
-    throw UnimplementedError("Orchestrator cross-isolate DB import not yet implemented.");
+    throw UnsupportedError(
+      "Cross-isolate memory restore is scheduled for Denizen AI v1.1. "
+      "Direct vector database restore is currently experimental.",
+    );
   }
 }
 
@@ -445,11 +463,21 @@ class DenizenModelManager {
 
     // 4. Check if file already exists locally at targetPath
     final targetFileObj = File(targetPath);
-    final bool exists = await targetFileObj.exists() && (await targetFileObj.length()) > 1024 * 1024;
+    bool exists = await targetFileObj.exists() && (await targetFileObj.length()) > 1024 * 1024;
+    
+    // For vision models, also assert mmproj exists
+    if (exists && model.isVision && model.vision != null) {
+      final storageDir = await _downloadService.getModelStorageDirectory();
+      final mmprojFile = File('${storageDir.path}/models/${model.author}/${model.vision!.mmprojFilename}');
+      final mmprojExists = await mmprojFile.exists() && (await mmprojFile.length()) > 1024 * 1024;
+      if (!mmprojExists) {
+        exists = false;
+      }
+    }
     
     if (!exists) {
-      // 5. Handle Storage/Eviction logic before download
-      final int requiredBytes = model.size;
+      // 5. Handle Storage/Eviction logic before download (including mmproj if vision)
+      final int requiredBytes = model.totalSizeBytes;
       final bool hasSpace = await _downloadService.hasEnoughStorage(requiredBytes);
       
       if (!hasSpace) {
@@ -460,7 +488,7 @@ class DenizenModelManager {
       // Check space again
       final bool hasSpacePostEviction = await _downloadService.hasEnoughStorage(requiredBytes);
       if (!hasSpacePostEviction) {
-        throw StorageQuotaException('Insufficient storage space to download model $modelId (${model.sizeGB.toStringAsFixed(1)} GB required). Eviction could not reclaim enough space because other cached models are marked as resident.');
+        throw StorageQuotaException('Insufficient storage space to download model $modelId (${model.totalSizeMB.toStringAsFixed(1)} MB required). Eviction could not reclaim enough space because other cached models are marked as resident.');
       }
 
       // 6. Gated Download based on wifi if required
@@ -471,12 +499,9 @@ class DenizenModelManager {
         }
       }
 
-      // 7. Perform the download and map progress
-      final downloadStream = _downloadService.downloadModel(
-        url: model.downloadUrl ?? '',
-        modelId: modelId,
-        fileName: model.filename ?? '',
-        author: model.author,
+      // 7. Perform the download with paired multi-file and integrity support
+      final downloadStream = _downloadService.downloadOfflineModel(
+        model: model,
       );
 
       await for (final downloadProgress in downloadStream) {
@@ -490,7 +515,7 @@ class DenizenModelManager {
           onProgress(DenizenDownloadProgress(
             progress: progressPercent,
             bytesDownloaded: downloadProgress.downloadedBytes ?? 0,
-            totalBytes: downloadProgress.totalBytes ?? model.size,
+            totalBytes: downloadProgress.totalBytes ?? model.totalSizeBytes,
           ));
         }
       }
@@ -499,11 +524,22 @@ class DenizenModelManager {
       targetPath = finalFile.path;
     }
 
-    // 8. Load the model into OfflineAIService
-    final bool loadSuccess = await _aiService.loadModel(
-      modelPath: targetPath,
-      model: model,
-    );
+    // 8. Load the model into OfflineAIService (using loadVisionModel if vision)
+    final bool loadSuccess;
+    if (model.isVision && model.vision != null) {
+      final storageDir = await _downloadService.getModelStorageDirectory();
+      final mmprojPath = '${storageDir.path}/models/${model.author}/${model.vision!.mmprojFilename}';
+      loadSuccess = await _aiService.loadVisionModel(
+        modelPath: targetPath,
+        mmprojPath: mmprojPath,
+        model: model,
+      );
+    } else {
+      loadSuccess = await _aiService.loadModel(
+        modelPath: targetPath,
+        model: model,
+      );
+    }
 
     if (!loadSuccess) {
       throw Exception('Failed to load model into inference engine.');

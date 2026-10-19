@@ -1,20 +1,42 @@
-packages/llama_flutter_android/android/.cxx/
-packages/llama_flutter_android/example/build/
-
-*.apk
-*.lock
-.cxx/
-.gradle/
-Ubuntu-Elimu/
-
-website/
-
-# Staging & Test Clones
-staging_denizen_ai_os/
-scratch*/
-
-# Build and local cache artifacts
-build/
-.dart_tool/
+# Miscellaneous
+*.class
 *.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.buildlog/
+.history
+.svn/
+
+# IDE files
+*.iml
+*.ipr
+*.iws
+.idea/
+.vscode/
+
+# Flutter / Dart / Pub
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+pubspec.lock
+build/
+
+# Android Native
+**/android/**/gradle-wrapper.jar
+**/android/.gradle
+**/android/captures/
+**/android/local.properties
+**/android/**/GeneratedPluginRegistrant.java
+**/android/.cxx/
+**/android/build/
+
+# Desktop / Ephemeral / Debug Symbols
+**/ephemeral/
+**/windows/flutter/ephemeral/
+*.pdb
 

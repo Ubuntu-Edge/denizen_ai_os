@@ -53,6 +53,11 @@ void main() {
         return;
       }
 
+      if (!storageService.isVecAvailable) {
+        print('Expected skip: native sqlite-vec extension is missing on the host');
+        return;
+      }
+
       final docId = 999;
       
       final embedding1 = List.filled(384, 0.1);

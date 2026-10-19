@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import '../llama/llama.dart';
 import '../models/offline_model.dart';
 import '../models/offline_context_params.dart';
+import 'device_hardware_service.dart';
 
 /// Service for offline AI inference using llama.cpp via llama_flutter_android package.
 ///
@@ -36,6 +37,8 @@ class OfflineAIService {
 
   /// Currently loaded model info
   String? _loadedModelPath;
+  String? _loadedMmprojPath;
+  String? get loadedMmprojPath => _loadedMmprojPath;
   OfflineModel? _loadedModel;
   int _loadedContextSize = 2048;
 
@@ -49,24 +52,7 @@ class OfflineAIService {
 
   /// Initialize service
   Future<void> initialize() async {
-    debugPrint('✅ OfflineAIService initialized');
-    _sendAnonymousTelemetryPing();
-  }
-
-  /// Non-blocking, anonymous telemetry ping to track SDK deployment metrics.
-  /// Operates fire-and-forget; fails silently with zero effect on offline inference.
-  void _sendAnonymousTelemetryPing() {
-    try {
-      final client = HttpClient();
-      client.connectionTimeout = const Duration(seconds: 2);
-      final uri = Uri.parse('https://raw.githubusercontent.com/Ubuntu-Edge/denizen-ai-sdk/main/README.md');
-      client.getUrl(uri).then((request) {
-        request.headers.add('User-Agent', 'DenizenAI-SDK/1.0.0 (${Platform.operatingSystem})');
-        return request.close();
-      }).then((response) {
-        response.drain();
-      }).catchError((_) {});
-    } catch (_) {}
+    debugPrint('✅ OfflineAIService initialized (100% offline, zero telemetry)');
   }
 
   /// Load a GGUF model from device storage
@@ -136,7 +122,6 @@ class OfflineAIService {
       }
       
       _isModelLoaded = true;
-      _sendAnonymousTelemetryPing();
       _loadedModelPath = modelPath;
       _loadedModel = model;
       
@@ -156,6 +141,70 @@ class OfflineAIService {
     }
   }
 
+  /// Load a multimodal vision model with its visual projector (.mmproj)
+  Future<bool> loadVisionModel({
+    required String modelPath,
+    required String mmprojPath,
+    required OfflineModel model,
+    dynamic contextParams,
+  }) async {
+    // 1. Assert physical hardware RAM floor
+    await DeviceHardwareService.assertCompatibility(model);
+
+    // 2. Verify mmproj file exists
+    final mmprojFile = File(mmprojPath);
+    if (!await mmprojFile.exists()) {
+      debugPrint('❌ Vision mmproj file not found: $mmprojPath');
+      return false;
+    }
+
+    _loadedMmprojPath = mmprojPath;
+    final success = await loadModel(
+      modelPath: modelPath,
+      model: model,
+      contextParams: contextParams,
+    );
+
+    if (!success) {
+      _loadedMmprojPath = null;
+    }
+    return success;
+  }
+
+  /// Generate vision response from raw image bytes and text prompt.
+  /// 
+  /// NOTE: Strictly requires an active mmproj projector and native pixel tensor ingestion.
+  /// Text-only fallbacks with synthetic `<image>` tokens are explicitly blocked
+  /// to prevent ungrounded patient/diagnostic hallucinations.
+  Future<String> generateVision({
+    required Uint8List imageBytes,
+    required String prompt,
+    int maxTokens = 256,
+    double temperature = 0.1,
+  }) {
+    return _executionQueue.run(() async {
+      if (!_isModelLoaded || _controller == null) {
+        throw StateError('No offline AI model is loaded.');
+      }
+      if (_loadedMmprojPath == null) {
+        throw StateError(
+          'Loaded model is not configured with a vision projector (.mmproj). '
+          'Please load a multimodal model with loadVisionModel().',
+        );
+      }
+      if (imageBytes.isEmpty) {
+        throw ArgumentError('imageBytes cannot be empty for multimodal inference.');
+      }
+
+      // Explicitly guard: until JNI pixel ingestion is wired, fail closed
+      // rather than fabricating an answer from ungrounded text tokens.
+      throw UnsupportedError(
+        'Native pixel tensor ingestion (clip.cpp JNI) is currently in progress. '
+        'Text-only generation with <image> token is blocked to prevent ungrounded hallucinations.',
+      );
+    });
+  }
+
   /// Unload current model
   Future<void> unloadModel() async {
     try {
@@ -168,6 +217,7 @@ class OfflineAIService {
     } finally {
       _isModelLoaded = false;
       _loadedModelPath = null;
+      _loadedMmprojPath = null;
       _loadedModel = null;
       _controller = null;
     }

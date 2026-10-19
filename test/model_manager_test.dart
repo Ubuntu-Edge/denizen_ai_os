@@ -51,12 +51,32 @@ class FakeModelDownloadService implements ModelDownloadService {
     required String fileName,
     required String author,
     bool useCompression = true,
+    int? expectedSizeBytes,
+    VisionConfig? vision,
+    int? minRamMB,
   }) async* {
     yield ModelDownloadProgress(
       modelId: modelId,
       stage: ModelDownloadStage.completed,
       progress: 100,
       localPath: '${tempDir.path}/models/$author/$fileName',
+    );
+  }
+
+  @override
+  Stream<ModelDownloadProgress> downloadOfflineModel({
+    required OfflineModel model,
+    bool useCompression = false,
+  }) {
+    return downloadModel(
+      url: model.downloadUrl ?? '',
+      modelId: model.id,
+      fileName: model.filename ?? '',
+      author: model.author,
+      useCompression: useCompression,
+      expectedSizeBytes: model.size,
+      vision: model.vision,
+      minRamMB: model.minRamMB,
     );
   }
   
